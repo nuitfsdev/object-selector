@@ -96,8 +96,10 @@ def main(config_path: Path):
         resolve(data["train_annotations"]), resolve(data["scene_cache"]),
         resolve(data["text_cache"]),
     )
-    val_set = ScanQAObjectDataset(
-        resolve(data["val_annotations"]), resolve(data["scene_cache"]),
+    evaluation_name = "dev" if "dev_annotations" in data else "val"
+    evaluation_annotations = data.get("dev_annotations", data["val_annotations"])
+    evaluation_set = ScanQAObjectDataset(
+        resolve(evaluation_annotations), resolve(data["scene_cache"]),
         resolve(data["text_cache"]),
     )
     training = config["training"]
@@ -106,8 +108,8 @@ def main(config_path: Path):
         num_workers=training["num_workers"], collate_fn=collate_samples,
         pin_memory=device.type == "cuda",
     )
-    val_loader = DataLoader(
-        val_set, batch_size=training["batch_size"], shuffle=False,
+    evaluation_loader = DataLoader(
+        evaluation_set, batch_size=training["batch_size"], shuffle=False,
         num_workers=training["num_workers"], collate_fn=collate_samples,
         pin_memory=device.type == "cuda",
     )
@@ -131,21 +133,36 @@ def main(config_path: Path):
     run_dir = resolve(training["output_dir"]) / stamp
     run_dir.mkdir(parents=True)
     (run_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(f"device={device} train={len(train_set):,} val={len(val_set):,} "
+    print(f"device={device} train={len(train_set):,} "
+          f"{evaluation_name}={len(evaluation_set):,} "
           f"trainable_parameters={parameter_count:,}")
+
+    selection_weights = training.get("selection_metrics", {"dynamic_f1": 1.0})
+    if not selection_weights or sum(float(value) for value in selection_weights.values()) <= 0:
+        raise ValueError("training.selection_metrics must contain positive weights")
 
     history, best_score, stale = [], -1.0, 0
     for epoch in range(1, int(training["epochs"]) + 1):
         started = time.perf_counter()
         train_metrics = run_epoch(train_loader, model, device, True, optimizer, training, scaler)
-        val_metrics = run_epoch(val_loader, model, device, False, None, training, scaler)
+        evaluation_metrics = run_epoch(
+            evaluation_loader, model, device, False, None, training, scaler)
         row = {
             "epoch": epoch, "seconds": time.perf_counter() - started,
             **{f"train_{key}": value for key, value in train_metrics.items()},
-            **{f"val_{key}": value for key, value in val_metrics.items()},
+            **{f"{evaluation_name}_{key}": value
+               for key, value in evaluation_metrics.items()},
         }
         history.append(row)
         print(json.dumps(row))
+        missing_metrics = set(selection_weights) - set(evaluation_metrics)
+        if missing_metrics:
+            raise KeyError(f"Unknown selection metrics: {sorted(missing_metrics)}")
+        weight_sum = sum(float(value) for value in selection_weights.values())
+        selection_score = sum(
+            evaluation_metrics[key] * float(weight)
+            for key, weight in selection_weights.items()
+        ) / weight_sum
         checkpoint = {
             "model_state": model.state_dict(), "model_config": config["model"],
             "text_dim": sample["question_feature"].numel(),
@@ -153,10 +170,12 @@ def main(config_path: Path):
             "appearance_dim": sample["appearance"].shape[1],
             "context_dim": sample["context"].shape[1],
             "point_dim": sample["object_points"].shape[2],
-            "val_metrics": val_metrics,
+            "evaluation_split": evaluation_name,
+            f"{evaluation_name}_metrics": evaluation_metrics,
+            "selection_metrics": selection_weights,
+            "selection_score": selection_score,
         }
         torch.save(checkpoint, run_dir / "last.pt")
-        selection_score = val_metrics["dynamic_f1"]
         if selection_score > best_score:
             best_score, stale = selection_score, 0
             torch.save(checkpoint, run_dir / "best.pt")
