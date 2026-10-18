@@ -93,6 +93,12 @@ Review `config.json`, then run:
 python train.py --config config.json
 ```
 
+For an RTX 3090 VPS, follow [VPS_GUIDE.md](VPS_GUIDE.md). The included
+`vps_setup.sh` installs CUDA PyTorch and verifies the GPU, while
+`prepare_vps_data.sh` downloads/prepares all data and `run_vps_training.sh`
+trains from verified caches. `run_vps_all.sh` runs the complete pipeline after
+a Git clone; no local dataset upload is required.
+
 Checkpoints and `history.json` are written under `runs/<timestamp>/`. The best
 checkpoint is selected using validation dynamic-F1, where the count head decides
 how many objects to return.
