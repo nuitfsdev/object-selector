@@ -103,6 +103,10 @@ Checkpoints and `history.json` are written under `runs/<timestamp>/`. The best
 checkpoint is selected using validation dynamic-F1, where the count head decides
 how many objects to return.
 
+For a leakage-controlled experiment, use [CLEAN_EXPERIMENT_GUIDE.md](CLEAN_EXPERIMENT_GUIDE.md).
+It creates a scene-disjoint train/dev split, chooses the checkpoint and score
+threshold only on dev, then evaluates official ScanQA val once.
+
 Loss:
 
 ```text
