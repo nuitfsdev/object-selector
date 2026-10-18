@@ -12,4 +12,4 @@ if [[ ! -f cache/scene_objects.pt || ! -f cache/text_embeddings.pt ]]; then
   bash prepare_vps_data.sh "$@"
 fi
 
-bash run_vps_training.sh
+bash run_clean_experiment.sh
