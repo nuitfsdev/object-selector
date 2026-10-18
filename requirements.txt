@@ -4,4 +4,5 @@ plyfile>=1.0
 torch>=2.1
 transformers>=4.40
 tqdm>=4.66
+gdown>=5.2
 

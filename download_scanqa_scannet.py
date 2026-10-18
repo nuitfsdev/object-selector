@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
+import shutil
+import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -13,7 +14,29 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WORKSPACE = HERE.parent
 TOS_URL = "https://kaldir.vc.in.tum.de/scannet/ScanNet_TOS.pdf"
+SCANNET_BASE_URL = "http://kaldir.vc.cit.tum.de/scannet/v2/scans"
 SUFFIXES = ("_vh_clean_2.ply", "_vh_clean_2.0.010000.segs.json", ".aggregation.json")
+
+
+def download_file(scene: str, suffix: str, destination: Path, retries: int = 3) -> None:
+    """Download one public ScanNet file atomically, with bounded retries."""
+    url = f"{SCANNET_BASE_URL}/{scene}/{scene}{suffix}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "ScanQA-object-selector/1.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
+            if temporary.stat().st_size == 0:
+                raise OSError("downloaded an empty file")
+            temporary.replace(destination)
+            return
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            if attempt == retries:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def main():
@@ -25,7 +48,6 @@ def main():
     args = parser.parse_args()
     if not args.accept_scannet_tos:
         parser.error(f"Read and accept {TOS_URL}, then pass --accept-scannet-tos")
-    downloader = WORKSPACE / "download-scannet.py"
     splits = ("train", "val") if args.split == "both" else (args.split,)
     scenes = set()
     for split in splits:
@@ -36,16 +58,14 @@ def main():
     for scene in sorted(scenes):
         for suffix in SUFFIXES:
             destination = args.output / "scans" / scene / f"{scene}{suffix}"
-            if not destination.is_file():
+            if not destination.is_file() or destination.stat().st_size == 0:
                 jobs.append((scene, suffix))
     print(f"Scenes={len(scenes)} files_to_download={len(jobs)}")
 
     def download(job):
         scene, suffix = job
-        subprocess.run([
-            sys.executable, str(downloader), "--skip_existing", "--id", scene,
-            "--type", suffix, "-o", str(args.output),
-        ], input="\n", text=True, check=True)
+        destination = args.output / "scans" / scene / f"{scene}{suffix}"
+        download_file(scene, suffix, destination)
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(download, job) for job in jobs]
