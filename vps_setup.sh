@@ -5,7 +5,18 @@ set -euo pipefail
 # Override when needed: TORCH_INDEX_URL=... bash vps_setup.sh
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 
-python3 -m venv .venv
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+else
+  echo "Python was not found on this VPS." >&2
+  echo "Ubuntu/Debian: apt update && apt install -y python3 python3-venv python3-pip" >&2
+  echo "Rocky/Alma/CentOS: dnf install -y python3 python3-pip" >&2
+  exit 127
+fi
+
+"$PYTHON_BIN" -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip wheel
 python -m pip install torch==2.12.1 --index-url "$TORCH_INDEX_URL"

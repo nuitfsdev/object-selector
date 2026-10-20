@@ -4,3 +4,4 @@ runs_clean/
 predictions*.jsonl
 __pycache__/
 *.pyc
+.downloads/
