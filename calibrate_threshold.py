@@ -38,8 +38,11 @@ def evaluate(records, threshold, fallback_k, max_objects):
         precision = hits / len(selected)
         recall = hits / relevant
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        count_error = abs(len(selected) - relevant)
+        exact_set_match = hits == relevant and len(selected) == relevant
         rows.append((precision, recall, f1, hits > 0, hits == relevant,
-                     len(selected), fallback, capped))
+                     len(selected), fallback, capped, exact_set_match,
+                     count_error, count_error == 0))
     matrix = np.asarray(rows, dtype=np.float64)
     return {
         "threshold": threshold,
@@ -51,6 +54,9 @@ def evaluate(records, threshold, fallback_k, max_objects):
         "selected_count_mean": matrix[:, 5].mean(),
         "fallback_rate": matrix[:, 6].mean(),
         "capped_rate": matrix[:, 7].mean(),
+        "exact_set_match": matrix[:, 8].mean(),
+        "count_mae": matrix[:, 9].mean(),
+        "count_accuracy": matrix[:, 10].mean(),
     }
 
 
@@ -66,6 +72,9 @@ def main():
     parser.add_argument("--threshold-step", type=float, default=0.01)
     parser.add_argument("--target-recall-all", type=float, default=0.75)
     parser.add_argument("--max-average-objects", type=float, default=10.0)
+    parser.add_argument("--f1-weight", type=float, default=0.5)
+    parser.add_argument("--exact-set-weight", type=float, default=0.3)
+    parser.add_argument("--count-mae-weight", type=float, default=0.2)
     parser.add_argument("--fallback-k", type=int, default=10)
     parser.add_argument("--max-objects", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -73,6 +82,11 @@ def main():
     args = parser.parse_args()
     if args.threshold_step <= 0 or args.threshold_min > args.threshold_max:
         parser.error("Invalid threshold range")
+    if min(args.f1_weight, args.exact_set_weight, args.count_mae_weight) < 0:
+        parser.error("Calibration weights cannot be negative")
+    calibration_weight_sum = args.f1_weight + args.exact_set_weight + args.count_mae_weight
+    if calibration_weight_sum <= 0:
+        parser.error("At least one calibration weight must be positive")
 
     device = torch.device(
         "cuda" if args.device == "auto" and torch.cuda.is_available()
@@ -105,13 +119,20 @@ def main():
                   for i in range(steps + 1)]
     curve = [evaluate(records, threshold, args.fallback_k, args.max_objects)
              for threshold in thresholds]
+    for row in curve:
+        row["selection_score"] = (
+            args.f1_weight * row["f1"]
+            + args.exact_set_weight * row["exact_set_match"]
+            + args.count_mae_weight * (1.0 / (1.0 + row["count_mae"]))
+        ) / calibration_weight_sum
     eligible = [row for row in curve
                 if row["recall_all"] >= args.target_recall_all
                 and row["selected_count_mean"] <= args.max_average_objects]
     constraints_met = bool(eligible)
     candidates = eligible or curve
     selected = max(candidates, key=lambda row: (
-        row["f1"], row["recall_all"], row["precision"], -row["selected_count_mean"]))
+        row["selection_score"], row["recall_all"], row["f1"],
+        -row["selected_count_mean"]))
 
     policy = {
         "checkpoint": str(args.checkpoint.resolve()),
@@ -119,7 +140,15 @@ def main():
         "calibration_annotations": str(args.annotations.resolve()),
         "num_calibration_questions": len(records),
         "selected_threshold": selected["threshold"],
-        "selection_rule": "maximize macro F1 subject to constraints",
+        "selection_rule": (
+            "maximize weighted F1 + exact set match + inverse count MAE "
+            "subject to constraints"
+        ),
+        "selection_weights": {
+            "f1": args.f1_weight,
+            "exact_set_match": args.exact_set_weight,
+            "count_mae": args.count_mae_weight,
+        },
         "target_recall_all": args.target_recall_all,
         "max_average_objects": args.max_average_objects,
         "constraints_met": constraints_met,

@@ -1,6 +1,8 @@
 cache/*.pt
 runs/
 runs_clean/
+runs_clean_top10/
+runs_clean_flexible/
 predictions*.jsonl
 __pycache__/
 *.pyc

@@ -1,4 +1,4 @@
-"""Evaluate a fixed score threshold without tuning it on the evaluation split."""
+"""Evaluate threshold-based or fixed Top-K object selection."""
 
 from __future__ import annotations
 
@@ -25,7 +25,10 @@ def main():
     parser.add_argument("--scene-cache", type=Path, required=True)
     parser.add_argument("--text-cache", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--selection-mode", choices=("threshold", "topk"),
+                        default="threshold")
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--fallback-k", type=int, default=10)
     parser.add_argument("--max-objects", type=int, default=0,
                         help="0 means no cap; otherwise retain only the highest scores")
@@ -36,6 +39,8 @@ def main():
 
     if not 0 <= args.threshold <= 1:
         parser.error("--threshold must be in [0, 1]")
+    if args.top_k < 1:
+        parser.error("--top-k must be positive")
     if args.fallback_k < 1:
         parser.error("--fallback-k must be positive")
     if args.max_objects < 0:
@@ -69,16 +74,22 @@ def main():
             for index in range(len(scores)):
                 valid_count = int(batch["valid_mask"][index].sum())
                 valid_scores = scores[index, :valid_count]
-                selected = torch.where(valid_scores >= args.threshold)[0]
-                used_fallback = len(selected) == 0
-                if used_fallback:
-                    count = min(args.fallback_k, valid_count)
+                if args.selection_mode == "topk":
+                    count = min(args.top_k, valid_count)
                     selected = valid_scores.topk(count).indices
+                    used_fallback = False
+                    was_capped = False
                 else:
-                    selected = selected[valid_scores[selected].argsort(descending=True)]
-                was_capped = args.max_objects > 0 and len(selected) > args.max_objects
-                if was_capped:
-                    selected = selected[:args.max_objects]
+                    selected = torch.where(valid_scores >= args.threshold)[0]
+                    used_fallback = len(selected) == 0
+                    if used_fallback:
+                        count = min(args.fallback_k, valid_count)
+                        selected = valid_scores.topk(count).indices
+                    else:
+                        selected = selected[valid_scores[selected].argsort(descending=True)]
+                    was_capped = args.max_objects > 0 and len(selected) > args.max_objects
+                    if was_capped:
+                        selected = selected[:args.max_objects]
 
                 targets = batch["targets"][index, :valid_count]
                 relevant_count = int(targets.sum())
@@ -87,11 +98,14 @@ def main():
                 recall = hits / relevant_count
                 f1 = (2 * precision * recall / (precision + recall)
                       if precision + recall else 0.0)
+                count_absolute_error = abs(len(selected) - relevant_count)
                 selected_indices = selected.tolist()
                 predictions.append({
                     "question_id": batch["question_ids"][index],
                     "scene_id": batch["scene_ids"][index],
-                    "threshold": args.threshold,
+                    "selection_mode": args.selection_mode,
+                    "threshold": args.threshold if args.selection_mode == "threshold" else None,
+                    "top_k": args.top_k if args.selection_mode == "topk" else None,
                     "used_fallback_topk": used_fallback,
                     "was_capped": was_capped,
                     "selected_count": len(selected_indices),
@@ -102,6 +116,12 @@ def main():
                     "f1": f1,
                     "hit": float(hits > 0),
                     "recall_all": float(hits == relevant_count),
+                    "exact_set_match": float(
+                        hits == relevant_count and len(selected) == relevant_count),
+                    "count_absolute_error": count_absolute_error,
+                    "count_accuracy": float(count_absolute_error == 0),
+                    "over_selected": float(len(selected) > relevant_count),
+                    "under_selected": float(len(selected) < relevant_count),
                     "selected_object_ids": [int(batch["object_ids"][index, j])
                                             for j in selected_indices],
                     "scores": [float(valid_scores[j]) for j in selected_indices],
@@ -111,16 +131,24 @@ def main():
     counts = np.asarray([row["selected_count"] for row in predictions])
     fallback_count = sum(row["used_fallback_topk"] for row in predictions)
     capped_count = sum(row["was_capped"] for row in predictions)
+    policy_description = (
+        f"fixed Top-{args.top_k} by score"
+        if args.selection_mode == "topk"
+        else "score >= threshold; if empty, fallback Top-K; optional cap"
+    )
     summary = {
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "annotations": str(args.annotations.resolve()),
         "num_questions": len(predictions),
-        "selection_policy": "score >= threshold; if empty, fallback Top-K; optional cap",
-        "threshold": args.threshold,
-        "threshold_source": args.threshold_source,
-        "fallback_k": args.fallback_k,
-        "max_objects": args.max_objects,
+        "selection_mode": args.selection_mode,
+        "selection_policy": policy_description,
+        "threshold": args.threshold if args.selection_mode == "threshold" else None,
+        "threshold_source": (args.threshold_source
+                             if args.selection_mode == "threshold" else None),
+        "top_k": args.top_k if args.selection_mode == "topk" else None,
+        "fallback_k": args.fallback_k if args.selection_mode == "threshold" else None,
+        "max_objects": args.max_objects if args.selection_mode == "threshold" else None,
         "fallback_questions": fallback_count,
         "fallback_rate": fallback_count / max(len(predictions), 1),
         "capped_questions": capped_count,
@@ -130,6 +158,11 @@ def main():
         "f1": average(predictions, "f1"),
         "hit": average(predictions, "hit"),
         "recall_all": average(predictions, "recall_all"),
+        "exact_set_match": average(predictions, "exact_set_match"),
+        "count_mae": average(predictions, "count_absolute_error"),
+        "count_accuracy": average(predictions, "count_accuracy"),
+        "over_selection_rate": average(predictions, "over_selected"),
+        "under_selection_rate": average(predictions, "under_selected"),
         "selected_count_mean": float(counts.mean()),
         "selected_count_median": float(np.median(counts)),
         "selected_count_p90": float(np.quantile(counts, 0.9)),
