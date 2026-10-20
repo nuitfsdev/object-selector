@@ -35,7 +35,7 @@ mkdir -p "$DOWNLOAD_DIR" "$SCANNET_ROOT"
 if [[ ! -s "$ARCHIVE_PATH" ]]; then
   echo "[1/4] Downloading ScanNet TAR from Google Drive..."
   rm -f "$TEMP_ARCHIVE"
-  python -m gdown --fuzzy "$DRIVE_URL" --output "$TEMP_ARCHIVE"
+  python -m gdown "$DRIVE_URL" --output "$TEMP_ARCHIVE"
   mv "$TEMP_ARCHIVE" "$ARCHIVE_PATH"
 else
   echo "[1/4] Reusing existing archive: $ARCHIVE_PATH"
