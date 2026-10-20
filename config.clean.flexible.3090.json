@@ -1,0 +1,46 @@
+{
+  "seed": 42,
+  "data": {
+    "train_annotations": "../data/scanqa/splits/seed42/ScanQA_v1.0_train_fit.json",
+    "dev_annotations": "../data/scanqa/splits/seed42/ScanQA_v1.0_train_dev.json",
+    "val_annotations": "../data/scanqa/ScanQA_v1.0_val.json",
+    "scene_cache": "cache/scene_objects.pt",
+    "text_cache": "cache/text_embeddings.pt"
+  },
+  "model": {
+    "hidden_dim": 256,
+    "num_layers": 2,
+    "num_heads": 4,
+    "dropout": 0.1,
+    "max_count": 25
+  },
+  "training": {
+    "device": "cuda",
+    "amp": true,
+    "batch_size": 64,
+    "epochs": 30,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.01,
+    "count_loss_weight": 0.25,
+    "ranking_loss_weight": 0.1,
+    "ranking_margin": 0.5,
+    "gradient_clip": 1.0,
+    "patience": 7,
+    "num_workers": 4,
+    "selection_metrics": {
+      "dynamic_f1": {
+        "weight": 0.5,
+        "direction": "max"
+      },
+      "dynamic_exact_set_match": {
+        "weight": 0.3,
+        "direction": "max"
+      },
+      "dynamic_count_mae": {
+        "weight": 0.2,
+        "direction": "min"
+      }
+    },
+    "output_dir": "runs_clean_flexible"
+  }
+}

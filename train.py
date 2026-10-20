@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import time
 from pathlib import Path
 
@@ -30,6 +31,34 @@ def choose_device(name):
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(name)
+
+
+def selection_score(metrics, specification):
+    """Combine max/min checkpoint metrics on a common higher-is-better scale."""
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for key, rule in specification.items():
+        if isinstance(rule, (int, float)):
+            weight, direction = float(rule), "max"
+        else:
+            weight = float(rule["weight"])
+            direction = rule.get("direction", "max")
+        if weight <= 0 or direction not in {"max", "min"}:
+            raise ValueError(f"Invalid checkpoint selection rule for {key}: {rule}")
+        value = float(metrics[key])
+        normalized = value if direction == "max" else 1.0 / (1.0 + max(value, 0.0))
+        weighted_sum += weight * normalized
+        weight_sum += weight
+    if weight_sum <= 0:
+        raise ValueError("training.selection_metrics must contain positive weights")
+    return weighted_sum / weight_sum
+
+
+def metric_checkpoint_name(metric):
+    """Create a stable, shell-friendly filename for a metric checkpoint."""
+    safe = metric.replace("@", "_at_")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", safe).strip("_")
+    return f"best_{safe}.pt"
 
 
 def run_epoch(loader, model, device, training, optimizer, config, scaler=None):
@@ -138,10 +167,12 @@ def main(config_path: Path):
           f"trainable_parameters={parameter_count:,}")
 
     selection_weights = training.get("selection_metrics", {"dynamic_f1": 1.0})
-    if not selection_weights or sum(float(value) for value in selection_weights.values()) <= 0:
-        raise ValueError("training.selection_metrics must contain positive weights")
+    if not selection_weights:
+        raise ValueError("training.selection_metrics cannot be empty")
 
+    extra_best_metrics = list(dict.fromkeys(training.get("save_best_metrics", [])))
     history, best_score, stale = [], -1.0, 0
+    best_metric_values = {key: float("-inf") for key in extra_best_metrics}
     for epoch in range(1, int(training["epochs"]) + 1):
         started = time.perf_counter()
         train_metrics = run_epoch(train_loader, model, device, True, optimizer, training, scaler)
@@ -158,11 +189,10 @@ def main(config_path: Path):
         missing_metrics = set(selection_weights) - set(evaluation_metrics)
         if missing_metrics:
             raise KeyError(f"Unknown selection metrics: {sorted(missing_metrics)}")
-        weight_sum = sum(float(value) for value in selection_weights.values())
-        selection_score = sum(
-            evaluation_metrics[key] * float(weight)
-            for key, weight in selection_weights.items()
-        ) / weight_sum
+        missing_extra_metrics = set(extra_best_metrics) - set(evaluation_metrics)
+        if missing_extra_metrics:
+            raise KeyError(f"Unknown save_best_metrics: {sorted(missing_extra_metrics)}")
+        checkpoint_score = selection_score(evaluation_metrics, selection_weights)
         checkpoint = {
             "model_state": model.state_dict(), "model_config": config["model"],
             "text_dim": sample["question_feature"].numel(),
@@ -173,11 +203,19 @@ def main(config_path: Path):
             "evaluation_split": evaluation_name,
             f"{evaluation_name}_metrics": evaluation_metrics,
             "selection_metrics": selection_weights,
-            "selection_score": selection_score,
+            "selection_score": checkpoint_score,
         }
         torch.save(checkpoint, run_dir / "last.pt")
-        if selection_score > best_score:
-            best_score, stale = selection_score, 0
+        for metric in extra_best_metrics:
+            metric_value = float(evaluation_metrics[metric])
+            if metric_value > best_metric_values[metric]:
+                best_metric_values[metric] = metric_value
+                metric_checkpoint = dict(checkpoint)
+                metric_checkpoint["checkpoint_metric"] = metric
+                metric_checkpoint["checkpoint_metric_value"] = metric_value
+                torch.save(metric_checkpoint, run_dir / metric_checkpoint_name(metric))
+        if checkpoint_score > best_score:
+            best_score, stale = checkpoint_score, 0
             torch.save(checkpoint, run_dir / "best.pt")
         else:
             stale += 1

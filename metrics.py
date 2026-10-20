@@ -31,8 +31,13 @@ def batch_metric_rows(scores, targets, valid_mask, count_logits, ks=(1, 3, 5, 7,
                         f"hit@{k}": hit, f"recall_all@{k}": all_hit})
         dynamic_count = min(int(predicted_counts[index]), valid_count)
         p, r, f1, hit, all_hit = _sample_metrics(order, relevant, dynamic_count)
+        exact_set_match = float(all_hit and dynamic_count == len(relevant))
+        count_absolute_error = abs(dynamic_count - len(relevant))
         row.update({"dynamic_precision": p, "dynamic_recall": r, "dynamic_f1": f1,
                     "dynamic_hit": hit, "dynamic_recall_all": all_hit,
+                    "dynamic_exact_set_match": exact_set_match,
+                    "dynamic_count_mae": count_absolute_error,
+                    "dynamic_count_accuracy": float(count_absolute_error == 0),
                     "predicted_count": dynamic_count,
                     "true_count": len(relevant)})
         rows.append(row)
