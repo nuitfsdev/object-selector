@@ -252,7 +252,13 @@ def main() -> None:
         if scene_dir is None:
             missing.append(scene_id)
             continue
-        cache[scene_id] = extract_scene(scene_id, scene_dir)
+        try:
+            cache[scene_id] = extract_scene(scene_id, scene_dir)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to extract {scene_id} from {scene_dir}. "
+                "One of its ScanNet files may be incomplete or corrupt."
+            ) from exc
 
     if missing and not args.allow_missing:
         examples = ", ".join(missing[:10])
